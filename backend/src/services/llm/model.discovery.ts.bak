@@ -1,0 +1,357 @@
+/**
+ * Model Discovery Service
+ * Discovers and manages available LLM models across providers
+ */
+
+import { LLMProvider } from './llm.types';
+import { ProviderType } from './llm.factory';
+import { ModelInfo, providerRegistry } from './provider.registry';
+
+export interface DiscoveryResult {
+  provider: ProviderType;
+  models: string[];
+  success: boolean;
+  error?: string;
+  timestamp: Date;
+}
+
+export interface ModelCapability {
+  name: string;
+  supported: boolean;
+  details?: string;
+}
+
+export interface ModelDetails {
+  id: string;
+  provider: ProviderType;
+  capabilities: ModelCapability[];
+  limits: {
+    maxContextLength: number;
+    maxOutputTokens: number;
+    maxRequestsPerMinute?: number;
+  };
+  pricing?: {
+    inputPer1k: number;
+    outputPer1k: number;
+    currency: string;
+  };
+  performance?: {
+    tokensPerSecond?: number;
+    latencyMs?: number;
+  };
+}
+
+export class ModelDiscoveryService {
+  private discoveryResults: Map<ProviderType, DiscoveryResult> = new Map();
+  private modelDetails: Map<string, ModelDetails> = new Map();
+  // private lastDiscovery: Date | null = null; // Unused for now
+
+  /**
+   * Discover models from all providers
+   */
+  async discoverAllModels(providers: Map<ProviderType, LLMProvider>): Promise<DiscoveryResult[]> {
+    const results: DiscoveryResult[] = [];
+    const timestamp = new Date();
+
+    for (const [providerType, provider] of providers.entries()) {
+      try {
+        const models = await provider.getAvailableModels();
+        
+        const result: DiscoveryResult = {
+          provider: providerType,
+          models,
+          success: true,
+          timestamp,
+        };
+
+        this.discoveryResults.set(providerType, result);
+        results.push(result);
+
+        // Update provider registry
+        await this.updateProviderRegistry(providerType, models);
+
+        console.log(`Discovered ${models.length} models from ${providerType}`);
+      } catch (error: any) {
+        const result: DiscoveryResult = {
+          provider: providerType,
+          models: [],
+          success: false,
+          error: error.message,
+          timestamp,
+        };
+
+        this.discoveryResults.set(providerType, result);
+        results.push(result);
+
+        console.error(`Failed to discover models from ${providerType}:`, error.message);
+      }
+    }
+
+    this.lastDiscovery = timestamp;
+    return results;
+  }
+
+  /**
+   * Discover models from a specific provider
+   */
+  async discoverProviderModels(
+    providerType: ProviderType,
+    provider: LLMProvider
+  ): Promise<DiscoveryResult> {
+    const timestamp = new Date();
+
+    try {
+      const models = await provider.getAvailableModels();
+      
+      const result: DiscoveryResult = {
+        provider: providerType,
+        models,
+        success: true,
+        timestamp,
+      };
+
+      this.discoveryResults.set(providerType, result);
+      
+      // Update provider registry
+      await this.updateProviderRegistry(providerType, models);
+
+      console.log(`Discovered ${models.length} models from ${providerType}`);
+      return result;
+    } catch (error: any) {
+      const result: DiscoveryResult = {
+        provider: providerType,
+        models: [],
+        success: false,
+        error: error.message,
+        timestamp,
+      };
+
+      this.discoveryResults.set(providerType, result);
+      
+      console.error(`Failed to discover models from ${providerType}:`, error.message);
+      return result;
+    }
+  }
+
+  /**
+   * Get discovery results
+   */
+  getDiscoveryResults(): DiscoveryResult[] {
+    return Array.from(this.discoveryResults.values());
+  }
+
+  /**
+   * Get discovery result for a provider
+   */
+  getProviderDiscovery(providerType: ProviderType): DiscoveryResult | null {
+    return this.discoveryResults.get(providerType) || null;
+  }
+
+  /**
+   * Get all discovered models
+   */
+  getAllDiscoveredModels(): string[] {
+    const allModels: string[] = [];
+    
+    for (const result of this.discoveryResults.values()) {
+      if (result.success) {
+        allModels.push(...result.models);
+      }
+    }
+    
+    return Array.from(new Set(allModels)); // Remove duplicates
+  }
+
+  /**
+   * Get models by provider
+   */
+  getModelsByProvider(providerType: ProviderType): string[] {
+    const result = this.discoveryResults.get(providerType);
+    return result?.success ? result.models : [];
+  }
+
+  /**
+   * Check if a model is available
+   */
+  isModelAvailable(modelId: string): boolean {
+    for (const result of this.discoveryResults.values()) {
+      if (result.success && result.models.includes(modelId)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Find provider for a model
+   */
+  findProviderForModel(modelId: string): ProviderType | null {
+    for (const [providerType, result] of this.discoveryResults.entries()) {
+      if (result.success && result.models.includes(modelId)) {
+        return providerType;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Get model details
+   */
+  getModelDetails(modelId: string): ModelDetails | null {
+    // Check cache first
+    if (this.modelDetails.has(modelId)) {
+      return this.modelDetails.get(modelId)!;
+    }
+
+    // Try to get from provider registry
+    const modelInfo = providerRegistry.getModel(modelId);
+    if (!modelInfo) {
+      return null;
+    }
+
+    // Create model details
+    const details: ModelDetails = {
+      id: modelId,
+      provider: modelInfo.provider,
+      capabilities: this.getModelCapabilities(modelInfo),
+      limits: {
+        maxContextLength: modelInfo.contextLength,
+        maxOutputTokens: modelInfo.maxOutputTokens,
+      },
+      pricing: modelInfo.costPer1kInput ? {
+        inputPer1k: modelInfo.costPer1kInput,
+        outputPer1k: modelInfo.costPer1kOutput || modelInfo.costPer1kInput,
+        currency: 'USD',
+      } : undefined,
+    };
+
+    this.modelDetails.set(modelId, details);
+    return details;
+  }
+
+  /**
+   * Find models by capability
+   */
+  findModelsByCapability(capability: string): string[] {
+    const models: string[] = [];
+    
+    for (const modelId of this.getAllDiscoveredModels()) {
+      const details = this.getModelDetails(modelId);
+      if (details && details.capabilities.some(cap => cap.name === capability && cap.supported)) {
+        models.push(modelId);
+      }
+    }
+    
+    return models;
+  }
+
+  /**
+   * Find models within budget
+   */
+  findModelsWithinBudget(
+    maxCostPer1kInput: number,
+    maxCostPer1kOutput?: number
+  ): Array<{ modelId: string; inputCost: number; outputCost: number }> {
+    const affordableModels: Array<{ modelId: string; inputCost: number; outputCost: number }> = [];
+    
+    for (const modelId of this.getAllDiscoveredModels()) {
+      const details = this.getModelDetails(modelId);
+      if (details?.pricing) {
+        const { inputPer1k, outputPer1k } = details.pricing;
+        
+        if (inputPer1k <= maxCostPer1kInput) {
+          if (!maxCostPer1kOutput || outputPer1k <= maxCostPer1kOutput) {
+            affordableModels.push({
+              modelId,
+              inputCost: inputPer1k,
+              outputCost: outputPer1k,
+            });
+          }
+        }
+      }
+    }
+    
+    // Sort by total cost
+    affordableModels.sort((a, b) => (a.inputCost + a.outputCost) - (b.inputCost + b.outputCost));
+    
+    return affordableModels;
+  }
+
+  /**
+   * Get model statistics
+   */
+  getModelStatistics(): {
+    totalModels: number;
+    modelsByProvider: Record<ProviderType, number>;
+    modelsWithPricing: number;
+    averageContextLength: number;
+  } {
+    const allModels = this.getAllDiscoveredModels();
+    const modelsByProvider: Record<ProviderType, number> = {} as Record<ProviderType, number>;
+    let totalContextLength = 0;
+    let modelsWithContext = 0;
+    let modelsWithPricing = 0;
+
+    // Count models by provider
+    for (const providerType of this.discoveryResults.keys()) {
+      modelsByProvider[providerType] = this.getModelsByProvider(providerType).length;
+    }
+
+    // Calculate statistics
+    for (const modelId of allModels) {
+      const details = this.getModelDetails(modelId);
+      
+      if (details) {
+        if (details.limits.maxContextLength > 0) {
+          totalContextLength += details.limits.maxContextLength;
+          modelsWithContext++;
+        }
+        
+        if (details.pricing) {
+          modelsWithPricing++;
+        }
+      }
+    }
+
+    return {
+      totalModels: allModels.length,
+      modelsByProvider,
+      modelsWithPricing,
+      averageContextLength: modelsWithContext > 0 ? Math.round(totalContextLength / modelsWithContext) : 0,
+    };
+  }
+
+  /**
+   * Schedule periodic discovery
+   */
+  scheduleDiscovery(
+    intervalMs: number,
+    providers: Map<ProviderType, LLMProvider>
+  ): NodeJS.Timeout {
+    return setInterval(async () => {
+      console.log(`Running scheduled model discovery at ${new Date().toISOString()}`);
+      await this.discoverAllModels(providers);
+    }, intervalMs);
+  }
+
+  private async updateProviderRegistry(_providerType: ProviderType, _models: string[]): Promise<void> {
+    // This method would update the provider registry with discovered models
+    // For now, we rely on the registry's own discovery mechanism
+    await providerRegistry.discoverModels();
+  }
+
+  private getModelCapabilities(modelInfo: ModelInfo): ModelCapability[] {
+    const capabilities: ModelCapability[] = [
+      { name: 'chat', supported: modelInfo.capabilities.includes('chat') },
+      { name: 'streaming', supported: modelInfo.capabilities.includes('streaming') },
+      { name: 'function-calling', supported: modelInfo.capabilities.includes('function-calling') },
+      { name: 'vision', supported: modelInfo.capabilities.includes('vision') },
+      { name: 'json-mode', supported: modelInfo.capabilities.includes('json-mode') },
+    ];
+
+    return capabilities;
+  }
+}
+
+// Singleton instance
+export const modelDiscovery = new ModelDiscoveryService();

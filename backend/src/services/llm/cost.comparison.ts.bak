@@ -1,0 +1,283 @@
+/**
+ * Cost Comparison Utility
+ * Compares costs across different LLM providers
+ */
+
+import { ModelInfo, ProviderInfo } from './provider.registry';
+
+export interface CostEstimate {
+  provider: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  inputCost: number;
+  outputCost: number;
+  totalCost: number;
+  costPerToken: number;
+}
+
+export interface ProviderCostComparison {
+  provider: string;
+  models: ModelCostComparison[];
+  averageCostPer1kTokens: number;
+  cheapestModel: string;
+  mostExpensiveModel: string;
+}
+
+export interface ModelCostComparison {
+  model: string;
+  inputCostPer1k: number;
+  outputCostPer1k: number;
+  totalCostForEstimate: number;
+  isCheapest: boolean;
+  isMostExpensive: boolean;
+}
+
+export class CostComparison {
+  /**
+   * Estimate cost for a completion
+   */
+  estimateCost(
+    providerInfo: ProviderInfo,
+    modelInfo: ModelInfo,
+    inputTokens: number,
+    outputTokens: number
+  ): CostEstimate {
+    const inputCostPer1k = modelInfo.costPer1kInput || providerInfo.costPer1kInput || 0;
+    const outputCostPer1k = modelInfo.costPer1kOutput || providerInfo.costPer1kOutput || 0;
+
+    const inputCost = (inputTokens / 1000) * inputCostPer1k;
+    const outputCost = (outputTokens / 1000) * outputCostPer1k;
+    const totalCost = inputCost + outputCost;
+    const totalTokens = inputTokens + outputTokens;
+    const costPerToken = totalTokens > 0 ? totalCost / totalTokens : 0;
+
+    return {
+      provider: providerInfo.type,
+      model: modelInfo.id,
+      inputTokens,
+      outputTokens,
+      inputCost,
+      outputCost,
+      totalCost,
+      costPerToken,
+    };
+  }
+
+  /**
+   * Compare costs across multiple providers/models
+   */
+  compareCosts(
+    providers: ProviderInfo[],
+    models: ModelInfo[],
+    estimatedInputTokens: number,
+    estimatedOutputTokens: number
+  ): ProviderCostComparison[] {
+    const comparisons: ProviderCostComparison[] = [];
+
+    // Group models by provider
+    const modelsByProvider = new Map<string, ModelInfo[]>();
+    for (const model of models) {
+      if (!modelsByProvider.has(model.provider)) {
+        modelsByProvider.set(model.provider, []);
+      }
+      modelsByProvider.get(model.provider)!.push(model);
+    }
+
+    // Create comparison for each provider
+    for (const provider of providers) {
+      const providerModels = modelsByProvider.get(provider.type) || [];
+      const modelComparisons: ModelCostComparison[] = [];
+
+      // Calculate costs for each model
+      for (const model of providerModels) {
+        const estimate = this.estimateCost(provider, model, estimatedInputTokens, estimatedOutputTokens);
+        
+        modelComparisons.push({
+          model: model.id,
+          inputCostPer1k: model.costPer1kInput || provider.costPer1kInput || 0,
+          outputCostPer1k: model.costPer1kOutput || provider.costPer1kOutput || 0,
+          totalCostForEstimate: estimate.totalCost,
+          isCheapest: false,
+          isMostExpensive: false,
+        });
+      }
+
+      // Sort by total cost
+      modelComparisons.sort((a, b) => a.totalCostForEstimate - b.totalCostForEstimate);
+
+      // Mark cheapest and most expensive
+      if (modelComparisons.length > 0) {
+        modelComparisons[0].isCheapest = true;
+        modelComparisons[modelComparisons.length - 1].isMostExpensive = true;
+      }
+
+      // Calculate average cost
+      const averageCost = modelComparisons.length > 0
+        ? modelComparisons.reduce((sum, mc) => sum + mc.totalCostForEstimate, 0) / modelComparisons.length
+        : 0;
+
+      comparisons.push({
+        provider: provider.type,
+        models: modelComparisons,
+        averageCostPer1kTokens: averageCost * (1000 / (estimatedInputTokens + estimatedOutputTokens)),
+        cheapestModel: modelComparisons[0]?.model || '',
+        mostExpensiveModel: modelComparisons[modelComparisons.length - 1]?.model || '',
+      });
+    }
+
+    // Sort providers by average cost
+    comparisons.sort((a, b) => a.averageCostPer1kTokens - b.averageCostPer1kTokens);
+
+    return comparisons;
+  }
+
+  /**
+   * Find cheapest provider/model combination
+   */
+  findCheapestOption(
+    providers: ProviderInfo[],
+    models: ModelInfo[],
+    estimatedInputTokens: number,
+    estimatedOutputTokens: number,
+    requirements?: {
+      minContextLength?: number;
+      capabilities?: string[];
+    }
+  ): { provider: string; model: string; cost: number } | null {
+    let filteredModels = models;
+
+    // Apply filters
+    if (requirements) {
+      if (requirements.minContextLength) {
+        filteredModels = filteredModels.filter(m => m.contextLength >= requirements.minContextLength!);
+      }
+      
+      if (requirements.capabilities) {
+        filteredModels = filteredModels.filter(m =>
+          requirements.capabilities!.every(cap => m.capabilities.includes(cap))
+        );
+      }
+    }
+
+    // Find cheapest option
+    let cheapestOption: { provider: string; model: string; cost: number } | null = null;
+
+    for (const provider of providers) {
+      const providerModels = filteredModels.filter(m => m.provider === provider.type);
+      
+      for (const model of providerModels) {
+        const estimate = this.estimateCost(provider, model, estimatedInputTokens, estimatedOutputTokens);
+        
+        if (!cheapestOption || estimate.totalCost < cheapestOption.cost) {
+          cheapestOption = {
+            provider: provider.type,
+            model: model.id,
+            cost: estimate.totalCost,
+          };
+        }
+      }
+    }
+
+    return cheapestOption;
+  }
+
+  /**
+   * Calculate monthly cost estimate
+   */
+  estimateMonthlyCost(
+    dailyAverageTokens: number,
+    providerCostPer1kTokens: number,
+    daysInMonth: number = 30
+  ): number {
+    const monthlyTokens = dailyAverageTokens * daysInMonth;
+    return (monthlyTokens / 1000) * providerCostPer1kTokens;
+  }
+
+  /**
+   * Generate cost report
+   */
+  generateCostReport(
+    providers: ProviderInfo[],
+    models: ModelInfo[],
+    usageScenarios: Array<{
+      name: string;
+      inputTokens: number;
+      outputTokens: number;
+      frequencyPerDay: number;
+    }>
+  ): string {
+    let report = 'LLM Cost Comparison Report\n';
+    report += '='.repeat(50) + '\n\n';
+
+    // Summary by provider
+    report += 'Provider Summary:\n';
+    report += '-'.repeat(30) + '\n';
+    
+    for (const provider of providers) {
+      const providerModels = models.filter(m => m.provider === provider.type);
+      const avgInputCost = providerModels.reduce((sum, m) => sum + (m.costPer1kInput || 0), 0) / providerModels.length || 0;
+      const avgOutputCost = providerModels.reduce((sum, m) => sum + (m.costPer1kOutput || 0), 0) / providerModels.length || 0;
+      
+      report += `${provider.name} (${provider.type}):\n`;
+      report += `  Models: ${providerModels.length}\n`;
+      report += `  Avg Input Cost: $${avgInputCost.toFixed(6)}/1K tokens\n`;
+      report += `  Avg Output Cost: $${avgOutputCost.toFixed(6)}/1K tokens\n\n`;
+    }
+
+    // Scenario analysis
+    report += 'Usage Scenario Analysis:\n';
+    report += '-'.repeat(30) + '\n';
+    
+    for (const scenario of usageScenarios) {
+      report += `Scenario: ${scenario.name}\n`;
+      report += `  Input: ${scenario.inputTokens.toLocaleString()} tokens\n`;
+      report += `  Output: ${scenario.outputTokens.toLocaleString()} tokens\n`;
+      report += `  Frequency: ${scenario.frequencyPerDay}/day\n`;
+
+      // Daily tokens calculated but not used in this report section
+
+      report += '  Monthly Cost Estimates:\n';
+      
+      for (const provider of providers) {
+        const providerModels = models.filter(m => m.provider === provider.type);
+        if (providerModels.length === 0) continue;
+
+        // Use cheapest model for estimate
+        const cheapestModel = providerModels.reduce((cheapest, current) => {
+          const currentCost = (current.costPer1kInput || 0) + (current.costPer1kOutput || 0);
+          const cheapestCost = (cheapest.costPer1kInput || 0) + (cheapest.costPer1kOutput || 0);
+          return currentCost < cheapestCost ? current : cheapest;
+        });
+
+        const inputCost = (scenario.inputTokens / 1000) * (cheapestModel.costPer1kInput || 0);
+        const outputCost = (scenario.outputTokens / 1000) * (cheapestModel.costPer1kOutput || 0);
+        const perCallCost = inputCost + outputCost;
+        const monthlyCost = perCallCost * scenario.frequencyPerDay * 30;
+
+        report += `    ${provider.name}: $${monthlyCost.toFixed(2)}/month (${cheapestModel.id})\n`;
+      }
+      
+      report += '\n';
+    }
+
+    // Recommendations
+    report += 'Recommendations:\n';
+    report += '-'.repeat(30) + '\n';
+    
+    for (const scenario of usageScenarios) {
+      const cheapest = this.findCheapestOption(providers, models, scenario.inputTokens, scenario.outputTokens);
+      
+      if (cheapest) {
+        const monthlyCost = (cheapest.cost * scenario.frequencyPerDay * 30);
+        report += `For ${scenario.name}: Use ${cheapest.provider} (${cheapest.model})\n`;
+        report += `  Cost: $${cheapest.cost.toFixed(6)} per call, $${monthlyCost.toFixed(2)} per month\n`;
+      }
+    }
+
+    return report;
+  }
+}
+
+// Singleton instance
+export const costComparison = new CostComparison();

@@ -1,0 +1,197 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  USER
+  DEVELOPER
+  BILLING_ADMIN
+}
+
+model User {
+  id                  String    @id @default(cuid())
+  email               String    @unique
+  name                String?
+  passwordHash       String
+  avatarUrl           String?
+  role                Role      @default(USER)
+  isActive            Boolean   @default(true)
+  failedLoginAttempts Int       @default(0)
+  lockedUntil         DateTime?
+  lockoutUntil        DateTime?
+  lastLoginAt         DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  sessions           Session[]
+  apiKeys            ApiKey[]
+  userPreference     UserPreference?
+  organizationUsers  OrganizationUser[]
+}
+
+model Session {
+  id            String    @id @default(cuid())
+  userId        String
+  personaId     String
+  title         String?
+  status        String    @default("active")
+  refreshToken  String?
+  expiresAt     DateTime?
+  userAgent     String?
+  ipAddress     String?
+  modelId       String?
+  aiModelId     String?
+  modelOverride String?
+  tokensUsed    Int       @default(0)
+  cost          Float     @default(0)
+  contextTokens Int       @default(0)
+  lastActiveAt DateTime?
+  endedAt       DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  persona   Persona   @relation(fields: [personaId], references: [id])
+  aiModel   AIModel?  @relation(fields: [aiModelId], references: [id])
+  messages  Message[]
+
+  @@index([userId])
+  @@index([personaId])
+  @@index([lastActiveAt])
+}
+
+model Message {
+  id           String   @id @default(cuid())
+  sessionId    String
+  role         String
+  content      String
+  inputTokens  Int      @default(0)
+  outputTokens Int      @default(0)
+  modelId      String?
+  cost         Float    @default(0)
+  createdAt    DateTime @default(now())
+
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+}
+
+model Persona {
+  id            String   @id @default(cuid())
+  name          String
+  description   String?
+  systemPrompt  String?
+  avatarUrl     String?
+  isActive      Boolean  @default(true)
+  isDefault     Boolean  @default(false)
+  modelId       String?
+  temperature   Float?
+  maxTokens     Int?
+  toolsEnabled  Boolean  @default(false)
+  memoryEnabled Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  sessions Session[]
+}
+
+model AIModel {
+  id              String   @id @default(cuid())
+  name            String
+  provider        String
+  modelIdentifier String
+  displayName     String?
+  description     String?
+  contextWindow   Int?
+  costPer1kInput  Float
+  costPer1kOutput Float
+  maxTokens       Int?
+  supportsVision  Boolean  @default(false)
+  supportsTools   Boolean  @default(false)
+  isActive       Boolean  @default(true)
+  isDefault      Boolean  @default(false)
+  createdAt      DateTime @default(now())
+
+  sessions Session[]
+}
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  userId      String?
+  userEmail   String?
+  action      String
+  resource    String?
+  resourceId  String?
+  details     String?
+  ipAddress   String?
+  userAgent   String?
+  errorMessage String?
+  createdAt   DateTime @default(now())
+}
+
+model Setting {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model ApiKey {
+  id           String   @id @default(cuid())
+  userId       String
+  name         String
+  key          String   @unique
+  provider     String
+  expiresAt    DateTime?
+  lastUsedAt   DateTime?
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model UserPreference {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  theme     String   @default("dark")
+  language  String   @default("en")
+  timezone  String   @default("UTC")
+  settings  String   @default("{}")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Organization {
+  id          String   @id @default(cuid())
+  name        String
+  slug        String   @unique
+  plan        String   @default("free")
+  settings    String   @default("{}")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  users OrganizationUser[]
+}
+
+model OrganizationUser {
+  id             String   @id @default(cuid())
+  organizationId String
+  userId         String
+  role           String   @default("member")
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, userId])
+}

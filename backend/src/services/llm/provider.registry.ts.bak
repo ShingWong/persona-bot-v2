@@ -1,0 +1,411 @@
+/**
+ * Provider Registry
+ * Manages dynamic registration and discovery of LLM providers
+ */
+
+import { LLMProvider, LLMProviderConfig } from './llm.types';
+import { ProviderType } from './llm.factory';
+
+export interface ProviderInfo {
+  type: ProviderType;
+  name: string;
+  description: string;
+  capabilities: string[];
+  defaultModels: string[];
+  costPer1kInput?: number;
+  costPer1kOutput?: number;
+  isAvailable: boolean;
+  lastChecked: Date;
+}
+
+export interface ModelInfo {
+  id: string;
+  provider: ProviderType;
+  name: string;
+  displayName: string;
+  description: string;
+  contextLength: number;
+  maxOutputTokens: number;
+  capabilities: string[];
+  costPer1kInput?: number;
+  costPer1kOutput?: number;
+  isAvailable: boolean;
+}
+
+export class ProviderRegistry {
+  private providers: Map<ProviderType, LLMProvider> = new Map();
+  private providerConfigs: Map<ProviderType, LLMProviderConfig> = new Map();
+  private providerInfo: Map<ProviderType, ProviderInfo> = new Map();
+  private models: Map<string, ModelInfo> = new Map();
+
+  /**
+   * Register a provider
+   */
+  registerProvider(
+    type: ProviderType,
+    provider: LLMProvider,
+    config: LLMProviderConfig,
+    info: Omit<ProviderInfo, 'type' | 'isAvailable' | 'lastChecked'>
+  ): void {
+    this.providers.set(type, provider);
+    this.providerConfigs.set(type, config);
+    this.providerInfo.set(type, {
+      ...info,
+      type,
+      isAvailable: true,
+      lastChecked: new Date(),
+    });
+
+    // Initialize provider
+    provider.initialize(config);
+    
+    console.log(`Provider ${type} registered: ${info.name}`);
+  }
+
+  /**
+   * Get provider by type
+   */
+  getProvider(type: ProviderType): LLMProvider | null {
+    return this.providers.get(type) || null;
+  }
+
+  /**
+   * Get all registered providers
+   */
+  getAllProviders(): ProviderType[] {
+    return Array.from(this.providers.keys());
+  }
+
+  /**
+   * Get provider information
+   */
+  getProviderInfo(type: ProviderType): ProviderInfo | null {
+    return this.providerInfo.get(type) || null;
+  }
+
+  /**
+   * Get all provider information
+   */
+  getAllProviderInfo(): ProviderInfo[] {
+    return Array.from(this.providerInfo.values());
+  }
+
+  /**
+   * Register a model
+   */
+  registerModel(model: ModelInfo): void {
+    this.models.set(model.id, model);
+  }
+
+  /**
+   * Get model by ID
+   */
+  getModel(modelId: string): ModelInfo | null {
+    return this.models.get(modelId) || null;
+  }
+
+  /**
+   * Get all models
+   */
+  getAllModels(): ModelInfo[] {
+    return Array.from(this.models.values());
+  }
+
+  /**
+   * Get models by provider
+   */
+  getModelsByProvider(provider: ProviderType): ModelInfo[] {
+    return Array.from(this.models.values()).filter(model => model.provider === provider);
+  }
+
+  /**
+   * Find best provider for requirements
+   */
+  findBestProvider(requirements: {
+    maxCost?: number;
+    minContextLength?: number;
+    capabilities?: string[];
+    preferredProviders?: ProviderType[];
+  }): ProviderType | null {
+    const availableProviders = this.getAllProviderInfo().filter(p => p.isAvailable);
+    
+    // Filter by capabilities
+    let candidates = availableProviders;
+    if (requirements.capabilities) {
+      candidates = candidates.filter(provider =>
+        requirements.capabilities!.every(cap => provider.capabilities.includes(cap))
+      );
+    }
+
+    // Filter by preferred providers
+    if (requirements.preferredProviders && candidates.length > 1) {
+      const preferred = candidates.filter(p => 
+        requirements.preferredProviders!.includes(p.type)
+      );
+      if (preferred.length > 0) {
+        candidates = preferred;
+      }
+    }
+
+    // Sort by cost (if available)
+    candidates.sort((a, b) => {
+      const costA = a.costPer1kInput || Infinity;
+      const costB = b.costPer1kInput || Infinity;
+      return costA - costB;
+    });
+
+    return candidates.length > 0 ? candidates[0].type : null;
+  }
+
+  /**
+   * Find best model for requirements
+   */
+  findBestModel(requirements: {
+    provider?: ProviderType;
+    maxCost?: number;
+    minContextLength?: number;
+    capabilities?: string[];
+  }): string | null {
+    let candidates = this.getAllModels().filter(model => model.isAvailable);
+
+    // Filter by provider
+    if (requirements.provider) {
+      candidates = candidates.filter(model => model.provider === requirements.provider);
+    }
+
+    // Filter by capabilities
+    if (requirements.capabilities) {
+      candidates = candidates.filter(model =>
+        requirements.capabilities!.every(cap => model.capabilities.includes(cap))
+      );
+    }
+
+    // Filter by context length
+    if (requirements.minContextLength) {
+      candidates = candidates.filter(model => 
+        model.contextLength >= requirements.minContextLength!
+      );
+    }
+
+    // Filter by cost
+    if (requirements.maxCost) {
+      candidates = candidates.filter(model => {
+        const cost = model.costPer1kInput || Infinity;
+        return cost <= requirements.maxCost!;
+      });
+    }
+
+    // Sort by cost (if available)
+    candidates.sort((a, b) => {
+      const costA = a.costPer1kInput || Infinity;
+      const costB = b.costPer1kInput || Infinity;
+      return costA - costB;
+    });
+
+    return candidates.length > 0 ? candidates[0].id : null;
+  }
+
+  /**
+   * Validate all providers
+   */
+  async validateProviders(): Promise<Record<ProviderType, boolean>> {
+    const results: Record<ProviderType, boolean> = {} as Record<ProviderType, boolean>;
+
+    for (const [type, provider] of this.providers.entries()) {
+      try {
+        const isValid = await provider.validateConfig();
+        results[type] = isValid;
+        
+        // Update provider info
+        const info = this.providerInfo.get(type);
+        if (info) {
+          info.isAvailable = isValid;
+          info.lastChecked = new Date();
+        }
+        
+        console.log(`Provider ${type} validation: ${isValid ? 'PASS' : 'FAIL'}`);
+      } catch (error) {
+        console.error(`Provider ${type} validation error:`, error);
+        results[type] = false;
+        
+        // Update provider info
+        const info = this.providerInfo.get(type);
+        if (info) {
+          info.isAvailable = false;
+          info.lastChecked = new Date();
+        }
+      }
+    }
+
+    return results;
+  }
+
+  /**
+   * Discover models from all providers
+   */
+  async discoverModels(): Promise<ModelInfo[]> {
+    const discoveredModels: ModelInfo[] = [];
+
+    for (const [type, provider] of this.providers.entries()) {
+      try {
+        const modelIds = await provider.getAvailableModels();
+        
+        for (const modelId of modelIds) {
+          const modelInfo: ModelInfo = {
+            id: modelId,
+            provider: type,
+            name: modelId,
+            displayName: this.getModelDisplayName(type, modelId),
+            description: this.getModelDescription(type, modelId),
+            contextLength: this.getModelContextLength(type, modelId),
+            maxOutputTokens: this.getModelMaxOutputTokens(type, modelId),
+            capabilities: this.getModelCapabilities(type, modelId),
+            costPer1kInput: this.getModelCost(type, modelId, 'input'),
+            costPer1kOutput: this.getModelCost(type, modelId, 'output'),
+            isAvailable: true,
+          };
+
+          this.registerModel(modelInfo);
+          discoveredModels.push(modelInfo);
+        }
+
+        console.log(`Discovered ${modelIds.length} models from ${type} provider`);
+      } catch (error) {
+        console.error(`Failed to discover models from ${type} provider:`, error);
+      }
+    }
+
+    return discoveredModels;
+  }
+
+  private getModelDisplayName(provider: ProviderType, modelId: string): string {
+    const mappings: Record<ProviderType, Record<string, string>> = {
+      openai: {
+        'gpt-4': 'GPT-4',
+        'gpt-4-turbo': 'GPT-4 Turbo',
+        'gpt-3.5-turbo': 'GPT-3.5 Turbo',
+      },
+      anthropic: {
+        'claude-3-5-haiku-latest': 'Claude 3.5 Haiku',
+        'claude-3-5-sonnet-latest': 'Claude 3.5 Sonnet',
+        'claude-3-5-opus-latest': 'Claude 3.5 Opus',
+      },
+      google: {
+        'gemini-1.5-pro': 'Gemini 1.5 Pro',
+        'gemini-1.5-flash': 'Gemini 1.5 Flash',
+      },
+      openrouter: {},
+      ollama: {},
+      mock: {},
+    };
+
+    return mappings[provider]?.[modelId] || modelId;
+  }
+
+  private getModelDescription(provider: ProviderType, modelId: string): string {
+    const descriptions: Record<ProviderType, string> = {
+      openai: 'OpenAI language model',
+      anthropic: 'Anthropic Claude model',
+      google: 'Google Gemini model',
+      openrouter: 'OpenRouter hosted model',
+      ollama: 'Local Ollama model',
+      mock: 'Mock model for testing',
+    };
+
+    return descriptions[provider] || 'Unknown model';
+  }
+
+  private getModelContextLength(provider: ProviderType, modelId: string): number {
+    const contextLengths: Record<ProviderType, Record<string, number>> = {
+      openai: {
+        'gpt-4': 8192,
+        'gpt-4-turbo': 128000,
+        'gpt-3.5-turbo': 16385,
+      },
+      anthropic: {
+        'claude-3-5-haiku-latest': 200000,
+        'claude-3-5-sonnet-latest': 200000,
+        'claude-3-5-opus-latest': 200000,
+      },
+      google: {
+        'gemini-1.5-pro': 1000000,
+        'gemini-1.5-flash': 1000000,
+      },
+      openrouter: {},
+      ollama: {},
+      mock: {},
+    };
+
+    return contextLengths[provider]?.[modelId] || 4096;
+  }
+
+  private getModelMaxOutputTokens(provider: ProviderType, modelId: string): number {
+    const maxOutputs: Record<ProviderType, Record<string, number>> = {
+      openai: {
+        'gpt-4': 4096,
+        'gpt-4-turbo': 4096,
+        'gpt-3.5-turbo': 4096,
+      },
+      anthropic: {
+        'claude-3-5-haiku-latest': 4096,
+        'claude-3-5-sonnet-latest': 4096,
+        'claude-3-5-opus-latest': 4096,
+      },
+      google: {
+        'gemini-1.5-pro': 8192,
+        'gemini-1.5-flash': 8192,
+      },
+      openrouter: {},
+      ollama: {},
+      mock: {},
+    };
+
+    return maxOutputs[provider]?.[modelId] || 2048;
+  }
+
+  private getModelCapabilities(provider: ProviderType, modelId: string): string[] {
+    const baseCapabilities = ['chat', 'streaming'];
+    
+    if (provider === 'openai' && modelId.includes('gpt-4')) {
+      return [...baseCapabilities, 'function-calling', 'vision'];
+    }
+    
+    if (provider === 'anthropic' && modelId.includes('claude-3')) {
+      return [...baseCapabilities, 'vision'];
+    }
+    
+    if (provider === 'google' && modelId.includes('gemini')) {
+      return [...baseCapabilities, 'vision'];
+    }
+    
+    return baseCapabilities;
+  }
+
+  private getModelCost(provider: ProviderType, modelId: string, type: 'input' | 'output'): number | undefined {
+    // Default costs in USD per 1K tokens
+    const costs: Record<ProviderType, Record<string, { input: number; output: number }>> = {
+      openai: {
+        'gpt-4': { input: 0.03, output: 0.06 },
+        'gpt-4-turbo': { input: 0.01, output: 0.03 },
+        'gpt-3.5-turbo': { input: 0.0015, output: 0.002 },
+      },
+      anthropic: {
+        'claude-3-5-haiku-latest': { input: 0.001, output: 0.005 },
+        'claude-3-5-sonnet-latest': { input: 0.003, output: 0.015 },
+        'claude-3-5-opus-latest': { input: 0.015, output: 0.075 },
+      },
+      google: {
+        'gemini-1.5-pro': { input: 0.00125, output: 0.00375 },
+        'gemini-1.5-flash': { input: 0.000075, output: 0.0003 },
+      },
+      openrouter: {},
+      ollama: {},
+      mock: {},
+    };
+
+    return costs[provider]?.[modelId]?.[type];
+  }
+}
+
+// Singleton instance
+export const providerRegistry = new ProviderRegistry();
